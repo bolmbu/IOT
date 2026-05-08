@@ -9,7 +9,7 @@
 #define IO_USERNAME  "kanka"
 
 // ใส่ Adafruit IO Key ของบัญชี kanka ตรงนี้
-#define IO_KEY       "aio_zaaI10xZlZ2vf8Mh0NaRNCmMynNO"
+#define IO_KEY       "key"
 
 #define WIFI_SSID    "Wokwi-GUEST"
 #define WIFI_PASS    ""
@@ -23,6 +23,10 @@ AdafruitIO_WiFi io(IO_USERNAME, IO_KEY, WIFI_SSID, WIFI_PASS);
 AdafruitIO_Feed *levelFeed = io.feed("water-level");
 AdafruitIO_Feed *tempFeed  = io.feed("water-temp");
 AdafruitIO_Feed *pumpFeed  = io.feed("pump-status");
+
+// Feed สำหรับข้อความแจ้งเตือน
+AdafruitIO_Feed *waterAlertFeed = io.feed("water-level-alert");
+AdafruitIO_Feed *tempAlertFeed  = io.feed("temp-alert");
 
 // ===============================
 // [3] Pin Setup
@@ -40,13 +44,17 @@ const int LED_R = 27;
 // ===============================
 const float POND_DEPTH = 200.0;
 
-// ระดับน้ำสำหรับเปิด/ปิดปั๊มอัตโนมัติ
-const float PUMP_ON_LEVEL  = 150.0;  // น้ำสูงถึง 150 cm → Pump ON
-const float PUMP_OFF_LEVEL = 50.0;  // น้ำลดถึง 120 cm → Pump OFF
+// ระยะห่างผิวน้ำ < 50 cm = น้ำสูง/น้ำล้นวิกฤต
+// ระยะห่างผิวน้ำ > 50 cm = ระดับน้ำปกติ ถ้าอุณหภูมิปกติด้วย
+const float CRITICAL_DISTANCE = 50.0;
 
-// ช่วงอุณหภูมิปลอดภัย
-const float MIN_SAFE_TEMP = 25.0;    // ต่ำกว่า 25°C = เย็นเกิน → Pump OFF
-const float MAX_SAFE_TEMP = 32.0;    // สูงกว่า 32°C = ร้อนเกิน → Pump ON
+// ใช้สำหรับแจ้งเตือนน้ำน้อย
+// ถ้า Water Level <= 50 cm = น้ำน้อย
+const float LOW_WATER_LEVEL = 50.0;
+
+// ช่วงอุณหภูมิปกติ 25 - 32°C
+const float MIN_SAFE_TEMP = 25.0;
+const float MAX_SAFE_TEMP = 32.0;
 
 // ===============================
 // [5] Sensor Setup
@@ -86,22 +94,22 @@ void setup() {
   sensors.begin();
 
   Serial.println("======================================");
-  Serial.println(" FISH POND AUTO PUMP SYSTEM STARTED ");
+  Serial.println(" WATER LEVEL TELEMETRY SYSTEM STARTED ");
   Serial.println("======================================");
 
   Serial.print("Pond Depth: ");
   Serial.print(POND_DEPTH);
   Serial.println(" cm");
 
-  Serial.print("Pump ON Level: ");
-  Serial.print(PUMP_ON_LEVEL);
+  Serial.print("Critical Distance: ");
+  Serial.print(CRITICAL_DISTANCE);
   Serial.println(" cm");
 
-  Serial.print("Pump OFF Level: ");
-  Serial.print(PUMP_OFF_LEVEL);
+  Serial.print("Low Water Level: ");
+  Serial.print(LOW_WATER_LEVEL);
   Serial.println(" cm");
 
-  Serial.print("Safe Temp: ");
+  Serial.print("Normal Temp Range: ");
   Serial.print(MIN_SAFE_TEMP);
   Serial.print(" - ");
   Serial.print(MAX_SAFE_TEMP);
@@ -136,7 +144,7 @@ void loop() {
 }
 
 // =====================================================
-// อ่าน Sensor + ควบคุม Pump + ส่งข้อมูลไป Adafruit IO
+// อ่าน Sensor + Logic ตามตาราง + ส่งข้อมูลไป Adafruit IO
 // =====================================================
 void monitorAndSend() {
   bool ultrasonicError = false;
@@ -149,6 +157,7 @@ void monitorAndSend() {
 
   // -------------------------------
   // 2. คำนวณระดับน้ำ
+  // Water Level = Pond Depth - Sensor Distance
   // -------------------------------
   float waterLevel = 0.0;
 
@@ -167,64 +176,115 @@ void monitorAndSend() {
   // -------------------------------
   String tempStatus = "NORMAL";
 
-  bool tempHot = false;
-  bool tempCold = false;
+  bool tempNormal = false;
+  bool tempAbnormal = false;
 
   if (tempError) {
     tempStatus = "TEMP ERROR";
-  } 
+  }
   else if (tempC > MAX_SAFE_TEMP) {
     tempStatus = "TOO HOT";
-    tempHot = true;
-  } 
+    tempAbnormal = true;
+  }
   else if (tempC < MIN_SAFE_TEMP) {
     tempStatus = "TOO COLD";
-    tempCold = true;
-  }
-
-  // -------------------------------
-  // 5. Auto Pump Logic
-  // -------------------------------
-  String pumpReason = "";
-
-  bool waterHigh = (!ultrasonicError && waterLevel >= PUMP_ON_LEVEL);
-  bool waterLow  = (!ultrasonicError && waterLevel <= PUMP_OFF_LEVEL);
-
-  if (ultrasonicError) {
-    // ถ้าเซนเซอร์ระดับน้ำมีปัญหา ให้ปิดปั๊ม
-    pumpState = 0;
-    pumpReason = "Ultrasonic Error";
-  }
-  else if (waterHigh) {
-    // น้ำสูงเกิน → เปิดปั๊ม
-    pumpState = 1;
-    pumpReason = "AUTO: Water Level High";
-  }
-  else if (tempHot) {
-    // น้ำร้อนเกิน → เปิดปั๊มเพื่อหมุนเวียนน้ำ
-    pumpState = 1;
-    pumpReason = "AUTO: Water Too Hot";
-  }
-  else if (tempCold) {
-    // น้ำเย็นเกิน → ปิดปั๊ม
-    pumpState = 0;
-    pumpReason = "AUTO: Water Too Cold";
-  }
-  else if (waterLow) {
-    // น้ำต่ำ/ปกติ → ปิดปั๊ม
-    pumpState = 0;
-    pumpReason = "AUTO: Water Level Normal";
+    tempAbnormal = true;
   }
   else {
-    // อยู่ช่วงกลาง 120-150 cm → คงสถานะเดิม
-    pumpReason = "AUTO: Keep Previous Pump State";
+    tempStatus = "NORMAL";
+    tempNormal = true;
+  }
+
+  // -------------------------------
+  // 5. สร้างข้อความ Alert
+  // -------------------------------
+  String waterAlertMessage = "";
+  String tempAlertMessage = "";
+
+  // แจ้งเตือนอุณหภูมิ
+  if (tempError) {
+    tempAlertMessage = "Temperature Sensor Error!";
+  }
+  else if (tempC < MIN_SAFE_TEMP) {
+    tempAlertMessage = "Warning: Low Temp!";
+  }
+  else if (tempC > MAX_SAFE_TEMP) {
+    tempAlertMessage = "Warning: High Temp!";
+  }
+  else {
+    tempAlertMessage = "Normal Temp!";
+  }
+
+  // แจ้งเตือนระดับน้ำ
+  if (ultrasonicError) {
+    waterAlertMessage = "Water Sensor Error!";
+  }
+  else if (sensorDistance < CRITICAL_DISTANCE) {
+    // ผิวน้ำอยู่ใกล้เซนเซอร์มาก = น้ำสูง / น้ำล้น
+    waterAlertMessage = "Warning: High Water Level!";
+  }
+  else if (waterLevel <= LOW_WATER_LEVEL) {
+    // ระดับน้ำต่ำเกินไป
+    waterAlertMessage = "Warning: Low Water Level!";
+  }
+  else {
+    waterAlertMessage = "Normal Water Level!";
+  }
+
+  // -------------------------------
+  // 6. Auto Logic ตามตารางทดสอบ
+  // -------------------------------
+  String systemStatus = "";
+  String pumpReason = "";
+
+  bool waterCritical = (!ultrasonicError && sensorDistance < CRITICAL_DISTANCE);
+  bool waterNormal   = (!ultrasonicError && sensorDistance > CRITICAL_DISTANCE);
+
+  if (ultrasonicError) {
+    // ถ้า Ultrasonic Error ให้ปิดปั๊มเพื่อความปลอดภัย
+    pumpState = 0;
+    systemStatus = "ERROR";
+    pumpReason = "Ultrasonic Error";
+  }
+  else if (tempError) {
+    // ถ้า Temp Error ให้ปิดปั๊มเพื่อความปลอดภัย
+    pumpState = 0;
+    systemStatus = "ERROR";
+    pumpReason = "Temperature Sensor Error";
+  }
+  else if (waterCritical) {
+    // ระยะห่างผิวน้ำ < 50 cm
+    // น้ำล้นวิกฤต → Relay ON / LED แดงติด
+    pumpState = 1;
+    systemStatus = "WARNING";
+    pumpReason = "Water Critical: Distance < 50 cm";
+  }
+  else if (tempAbnormal) {
+    // อุณหภูมิ > 32°C หรือ < 25°C
+    // Relay ON / LED แดงติด
+    pumpState = 1;
+    systemStatus = "WARNING";
+    pumpReason = "Temperature Abnormal";
+  }
+  else if (waterNormal && tempNormal) {
+    // ระยะห่างผิวน้ำ > 50 cm และอุณหภูมิ 25–32°C
+    // Relay OFF / LED เขียวติด
+    pumpState = 0;
+    systemStatus = "NORMAL";
+    pumpReason = "Normal Condition";
+  }
+  else {
+    // กรณีระยะเท่ากับ 50 cm พอดี หรือเคสอื่น ๆ
+    pumpState = 0;
+    systemStatus = "NORMAL";
+    pumpReason = "Default Normal";
   }
 
   // สั่ง Relay + LED
   setPump(pumpState);
 
   // -------------------------------
-  // 6. แสดงผล Serial Monitor
+  // 7. แสดงผล Serial Monitor
   // -------------------------------
   Serial.println();
   Serial.println(">>> Updating Cloud Data...");
@@ -253,14 +313,23 @@ void monitorAndSend() {
   Serial.print("Temp Status:     ");
   Serial.println(tempStatus);
 
+  Serial.print("System Status:   ");
+  Serial.println(systemStatus);
+
   Serial.print("Pump Reason:     ");
   Serial.println(pumpReason);
 
   Serial.print("Pump State:      ");
   Serial.println(pumpState == 1 ? "ON" : "OFF");
 
+  Serial.print("Water Alert:     ");
+  Serial.println(waterAlertMessage);
+
+  Serial.print("Temp Alert:      ");
+  Serial.println(tempAlertMessage);
+
   // -------------------------------
-  // 7. ส่งข้อมูลไป Adafruit IO
+  // 8. ส่งข้อมูลไป Adafruit IO
   // -------------------------------
   if (!ultrasonicError) {
     levelFeed->save(waterLevel);
@@ -279,10 +348,21 @@ void monitorAndSend() {
   }
 
   // ส่ง Pump Status ไป Adafruit IO
+  // 1 = ON, 0 = OFF
   pumpFeed->save(pumpState);
+
+  // ส่งข้อความแจ้งเตือนไป Adafruit IO
+  waterAlertFeed->save(waterAlertMessage);
+  tempAlertFeed->save(tempAlertMessage);
 
   Serial.print("Sent pump-status: ");
   Serial.println(pumpState == 1 ? "ON" : "OFF");
+
+  Serial.print("Sent water-level-alert: ");
+  Serial.println(waterAlertMessage);
+
+  Serial.print("Sent temp-alert: ");
+  Serial.println(tempAlertMessage);
 
   Serial.println("Data sent to Adafruit IO.");
   Serial.println("---------------------------");
@@ -320,7 +400,7 @@ float readTemperature(bool &error) {
   sensors.requestTemperatures();
   float tempC = sensors.getTempCByIndex(0);
 
-  if (tempC == DEVICE_DISCONNECTED_C || tempC <= -100) {
+  if (tempC == DEVICE_DISCONNECTED_C) {
     error = true;
     return 0.0;
   }
@@ -336,11 +416,11 @@ void setPump(int state) {
   digitalWrite(RELAY_PIN, state);
 
   if (state == HIGH) {
-    // Pump ON
+    // Relay ON / Pump ON / LED แดงติด
     digitalWrite(LED_R, HIGH);
     digitalWrite(LED_G, LOW);
   } else {
-    // Pump OFF
+    // Relay OFF / Pump OFF / LED เขียวติด
     digitalWrite(LED_R, LOW);
     digitalWrite(LED_G, HIGH);
   }
