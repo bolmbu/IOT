@@ -1,25 +1,26 @@
 # Fish Pond Auto Pump Monitoring System
 
-โปรเจกต์นี้เป็นระบบจำลองการตรวจสอบระดับน้ำและอุณหภูมิของบ่อปลา โดยใช้ ESP32 ร่วมกับเซนเซอร์ Ultrasonic HC-SR04 และ DS18B20 เพื่อควบคุมปั๊มน้ำอัตโนมัติ พร้อมส่งข้อมูลไปแสดงผลบน Adafruit IO Dashboard
+โปรเจกต์นี้เป็นระบบจำลองการตรวจสอบระดับน้ำและอุณหภูมิของบ่อปลา โดยใช้ ESP32 ร่วมกับเซนเซอร์ Ultrasonic HC-SR04 และ DS18B20 เพื่อควบคุม Relay / Pump อัตโนมัติ พร้อมส่งข้อมูลไปแสดงผลบน Adafruit IO Dashboard แบบ Real-time
 
 ## Features
 
-- วัดระดับน้ำในบ่อด้วย Ultrasonic Sensor
-- วัดอุณหภูมิน้ำด้วย DS18B20
-- ควบคุมปั๊มน้ำอัตโนมัติตามระดับน้ำและอุณหภูมิ
+- วัดระดับน้ำในบ่อด้วย Ultrasonic Sensor HC-SR04
+- วัดอุณหภูมิน้ำด้วย DS18B20 Temperature Sensor
+- ควบคุม Relay / Pump อัตโนมัติตามระดับน้ำและอุณหภูมิ
+- แสดงสถานะด้วย LED สีเขียวและ LED สีแดง
 - ส่งข้อมูลขึ้น Adafruit IO Dashboard
-- แสดงสถานะปั๊มผ่าน Feed: pump-status
-- แสดงสถานะผ่าน LED เขียว/แดง
+- ส่งข้อความแจ้งเตือนระดับน้ำ เช่น น้ำปกติ, น้ำเยอะ, น้ำน้อย
+- ส่งข้อความแจ้งเตือนอุณหภูมิ เช่น อุณหภูมิปกติ, ต่ำเกิน, สูงเกิน
 
 ## Required VS Code Extensions
 
-1. PlatformIO IDE  
-   ใช้สำหรับเขียน อัปโหลด และจัดการโปรเจกต์ ESP32/Arduino
+1. **PlatformIO IDE**  
+   ใช้สำหรับเขียน อัปโหลด และจัดการโปรเจกต์ ESP32 / Arduino
 
-2. Wokwi Simulator  
+2. **Wokwi Simulator**  
    ใช้สำหรับจำลองการทำงานของวงจร ESP32 และเซนเซอร์ใน VS Code
 
-3. C/C++ Extension Pack  
+3. **C/C++ Extension Pack**  
    ใช้ช่วยเขียนโค้ดภาษา C/C++ เช่น IntelliSense, ตรวจ syntax และ auto-complete
 
 ## Hardware / Components
@@ -30,7 +31,7 @@
 - Relay Module
 - Green LED
 - Red LED
-- Resistors
+- Resistor
 - Jumper wires
 
 ## Pin Connection
@@ -40,7 +41,7 @@
 | HC-SR04 TRIG | GPIO 5 |
 | HC-SR04 ECHO | GPIO 18 |
 | DS18B20 DATA | GPIO 4 |
-| Relay | GPIO 25 |
+| Relay Module | GPIO 25 |
 | Green LED | GPIO 26 |
 | Red LED | GPIO 27 |
 
@@ -52,30 +53,26 @@
 |---|---|
 | water-level | แสดงระดับน้ำในบ่อ หน่วย cm |
 | water-temp | แสดงอุณหภูมิน้ำ หน่วย °C |
-| pump-status | แสดงสถานะปั๊ม 1 = ON, 0 = OFF |
+| pump-status | แสดงสถานะ Relay / Pump โดย 1 = ON และ 0 = OFF |
+| water-level-alert | แสดงข้อความแจ้งเตือนระดับน้ำ |
+| temp-alert | แสดงข้อความแจ้งเตือนอุณหภูมิ |
 
-## Auto Pump Logic
+## Dashboard Setup
 
-ระบบควบคุมปั๊มอัตโนมัติตามเงื่อนไขนี้:
+ใน Adafruit IO Dashboard แนะนำให้สร้าง Block ดังนี้:
 
-| Condition | Pump Status |
+| Dashboard Block | Feed |
 |---|---|
-| Water Level >= 150 cm | ON |
-| Water Level <= 50 cm | OFF |
-| Temperature > 32°C | ON |
-| Temperature < 25°C | OFF |
-| Sensor Error | OFF |
+| Gauge ระดับน้ำ | water-level |
+| Gauge อุณหภูมิ | water-temp |
+| Indicator / Text สถานะ Pump | pump-status |
+| Text แจ้งเตือนระดับน้ำ | water-level-alert |
+| Text แจ้งเตือนอุณหภูมิ | temp-alert |
+| Line Chart | water-temp หรือ water-level |
 
-หมายเหตุ: ระดับน้ำคำนวณจากสูตร  
+## System Logic
+
+ระบบใช้ HC-SR04 วัดระยะจากเซนเซอร์ถึงผิวน้ำ จากนั้นคำนวณระดับน้ำด้วยสูตร:
+
+```text
 Water Level = Pond Depth - Sensor Distance
-
-โดยในโค้ดกำหนด Pond Depth = 200 cm
-
-## Important Settings in Code
-
-```cpp
-const float POND_DEPTH = 200.0;
-const float PUMP_ON_LEVEL  = 150.0;
-const float PUMP_OFF_LEVEL = 50.0;
-const float MIN_SAFE_TEMP = 25.0;
-const float MAX_SAFE_TEMP = 32.0;
