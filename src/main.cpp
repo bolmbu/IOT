@@ -9,7 +9,7 @@
 #define IO_USERNAME  "kanka"
 
 // ใส่ Adafruit IO Key ของบัญชี kanka ตรงนี้
-#define IO_KEY       "key"
+#define IO_KEY       "Adafuirt_key"
 
 #define WIFI_SSID    "Wokwi-GUEST"
 #define WIFI_PASS    ""
