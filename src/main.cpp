@@ -1,6 +1,4 @@
 #include <Arduino.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
 #include "AdafruitIO_WiFi.h"
 
 // ===============================
@@ -8,34 +6,43 @@
 // ===============================
 #define IO_USERNAME  "kanka"
 
-// ใส่ Adafruit IO Key ของบัญชี kanka ตรงนี้
-#define IO_KEY       "Adafuirt_key"
+// ตอนอัป GitHub อย่าใส่ Key จริง
+// ตอนรันจริงค่อยเปลี่ยนเป็น Adafruit IO Key ของตัวเอง
+#define IO_KEY       "ADA_KEY"
 
 #define WIFI_SSID    "Wokwi-GUEST"
 #define WIFI_PASS    ""
 
-// สร้างการเชื่อมต่อกับ Adafruit IO
 AdafruitIO_WiFi io(IO_USERNAME, IO_KEY, WIFI_SSID, WIFI_PASS);
 
 // ===============================
 // [2] Adafruit IO Feeds
 // ===============================
 AdafruitIO_Feed *levelFeed = io.feed("water-level");
-AdafruitIO_Feed *tempFeed  = io.feed("water-temp");
-AdafruitIO_Feed *pumpFeed  = io.feed("pump-status");
+AdafruitIO_Feed *oxygenFeed = io.feed("oxygen-level");
 
-// Feed สำหรับข้อความแจ้งเตือน
+AdafruitIO_Feed *pumpRelayFeed = io.feed("pump-relay-status");
+AdafruitIO_Feed *aeratorRelayFeed = io.feed("aerator-relay-status");
+
 AdafruitIO_Feed *waterAlertFeed = io.feed("water-level-alert");
-AdafruitIO_Feed *tempAlertFeed  = io.feed("temp-alert");
+AdafruitIO_Feed *oxygenAlertFeed = io.feed("oxygen-alert");
 
 // ===============================
 // [3] Pin Setup
 // ===============================
+
+// Ultrasonic Sensor HC-SR04
 const int TRIG_PIN = 5;
 const int ECHO_PIN = 18;
-const int TEMP_PIN = 4;
 
-const int RELAY_PIN = 25;
+// Oxygen Sensor จำลองด้วย Potentiometer
+const int OXYGEN_PIN = 34;
+
+// Relay 2 ตัว
+const int RELAY_PUMP = 25;      // Relay 1: ปั๊มน้ำ / ระบายน้ำ
+const int RELAY_AERATOR = 33;   // Relay 2: เครื่องตีน้ำ / เพิ่มออกซิเจน
+
+// LED
 const int LED_G = 26;
 const int LED_R = 27;
 
@@ -44,40 +51,33 @@ const int LED_R = 27;
 // ===============================
 const float POND_DEPTH = 200.0;
 
-// ระยะห่างผิวน้ำ < 50 cm = น้ำสูง/น้ำล้นวิกฤต
-// ระยะห่างผิวน้ำ > 50 cm = ระดับน้ำปกติ ถ้าอุณหภูมิปกติด้วย
+// ถ้าระยะผิวน้ำใกล้เซนเซอร์น้อยกว่า 50 cm = น้ำสูงเกิน
 const float CRITICAL_DISTANCE = 50.0;
 
-// ใช้สำหรับแจ้งเตือนน้ำน้อย
-// ถ้า Water Level <= 50 cm = น้ำน้อย
+// ถ้าระดับน้ำต่ำกว่าหรือเท่ากับ 50 cm = น้ำน้อย
 const float LOW_WATER_LEVEL = 50.0;
 
-// ช่วงอุณหภูมิปกติ 25 - 32°C
-const float MIN_SAFE_TEMP = 25.0;
-const float MAX_SAFE_TEMP = 32.0;
+// ค่า Oxygen ขั้นต่ำ
+const float MIN_OXYGEN = 5.0;   // mg/L
 
 // ===============================
-// [5] Sensor Setup
-// ===============================
-OneWire oneWire(TEMP_PIN);
-DallasTemperature sensors(&oneWire);
-
-// ===============================
-// [6] Timer
+// [5] Timer
 // ===============================
 unsigned long lastUpdate = 0;
 const unsigned long interval = 10000; // ส่งข้อมูลทุก 10 วินาที
 
-// สถานะปั๊ม
-int pumpState = 0;
+// Relay states
+int pumpRelayState = 0;
+int aeratorRelayState = 0;
 
 // ===============================
 // Function Prototypes
 // ===============================
 void monitorAndSend();
 float readUltrasonic(bool &error);
-float readTemperature(bool &error);
-void setPump(int state);
+float readOxygen();
+void setRelay(int relayPin, int state);
+void setAlertLED(bool abnormal);
 
 void setup() {
   Serial.begin(115200);
@@ -85,16 +85,21 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
-  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(OXYGEN_PIN, INPUT);
+
+  pinMode(RELAY_PUMP, OUTPUT);
+  pinMode(RELAY_AERATOR, OUTPUT);
+
   pinMode(LED_G, OUTPUT);
   pinMode(LED_R, OUTPUT);
 
-  setPump(LOW);
+  digitalWrite(RELAY_PUMP, LOW);
+  digitalWrite(RELAY_AERATOR, LOW);
 
-  sensors.begin();
+  setAlertLED(false);
 
   Serial.println("======================================");
-  Serial.println(" WATER LEVEL TELEMETRY SYSTEM STARTED ");
+  Serial.println(" WATER LEVEL + OXYGEN MONITOR STARTED ");
   Serial.println("======================================");
 
   Serial.print("Pond Depth: ");
@@ -109,11 +114,9 @@ void setup() {
   Serial.print(LOW_WATER_LEVEL);
   Serial.println(" cm");
 
-  Serial.print("Normal Temp Range: ");
-  Serial.print(MIN_SAFE_TEMP);
-  Serial.print(" - ");
-  Serial.print(MAX_SAFE_TEMP);
-  Serial.println(" C");
+  Serial.print("Minimum Oxygen: ");
+  Serial.print(MIN_OXYGEN);
+  Serial.println(" mg/L");
 
   Serial.println("======================================");
   Serial.print("Connecting to Adafruit IO");
@@ -129,12 +132,10 @@ void setup() {
   Serial.println("[SUCCESS] Adafruit IO Connected!");
   Serial.println("======================================");
 
-  // ส่งข้อมูลครั้งแรกทันที
   monitorAndSend();
 }
 
 void loop() {
-  // ต้องมีเสมอ เพื่อให้ Adafruit IO ทำงานต่อเนื่อง
   io.run();
 
   if (millis() - lastUpdate >= interval) {
@@ -144,21 +145,16 @@ void loop() {
 }
 
 // =====================================================
-// อ่าน Sensor + Logic ตามตาราง + ส่งข้อมูลไป Adafruit IO
+// อ่าน Sensor + ควบคุม Relay + ส่งข้อมูล
 // =====================================================
 void monitorAndSend() {
   bool ultrasonicError = false;
-  bool tempError = false;
 
   // -------------------------------
-  // 1. อ่านค่า Ultrasonic
+  // 1. อ่าน Ultrasonic
   // -------------------------------
   float sensorDistance = readUltrasonic(ultrasonicError);
 
-  // -------------------------------
-  // 2. คำนวณระดับน้ำ
-  // Water Level = Pond Depth - Sensor Distance
-  // -------------------------------
   float waterLevel = 0.0;
 
   if (!ultrasonicError) {
@@ -167,64 +163,26 @@ void monitorAndSend() {
   }
 
   // -------------------------------
-  // 3. อ่านอุณหภูมิ
+  // 2. อ่าน Oxygen Sensor
   // -------------------------------
-  float tempC = readTemperature(tempError);
+  float oxygenLevel = readOxygen();
 
   // -------------------------------
-  // 4. เช็กสถานะอุณหภูมิ
-  // -------------------------------
-  String tempStatus = "NORMAL";
-
-  bool tempNormal = false;
-  bool tempAbnormal = false;
-
-  if (tempError) {
-    tempStatus = "TEMP ERROR";
-  }
-  else if (tempC > MAX_SAFE_TEMP) {
-    tempStatus = "TOO HOT";
-    tempAbnormal = true;
-  }
-  else if (tempC < MIN_SAFE_TEMP) {
-    tempStatus = "TOO COLD";
-    tempAbnormal = true;
-  }
-  else {
-    tempStatus = "NORMAL";
-    tempNormal = true;
-  }
-
-  // -------------------------------
-  // 5. สร้างข้อความ Alert
+  // 3. Water Alert Logic
   // -------------------------------
   String waterAlertMessage = "";
-  String tempAlertMessage = "";
+  bool waterHigh = false;
+  bool waterLow = false;
 
-  // แจ้งเตือนอุณหภูมิ
-  if (tempError) {
-    tempAlertMessage = "Temperature Sensor Error!";
-  }
-  else if (tempC < MIN_SAFE_TEMP) {
-    tempAlertMessage = "Warning: Low Temp!";
-  }
-  else if (tempC > MAX_SAFE_TEMP) {
-    tempAlertMessage = "Warning: High Temp!";
-  }
-  else {
-    tempAlertMessage = "Normal Temp!";
-  }
-
-  // แจ้งเตือนระดับน้ำ
   if (ultrasonicError) {
     waterAlertMessage = "Water Sensor Error!";
   }
   else if (sensorDistance < CRITICAL_DISTANCE) {
-    // ผิวน้ำอยู่ใกล้เซนเซอร์มาก = น้ำสูง / น้ำล้น
+    waterHigh = true;
     waterAlertMessage = "Warning: High Water Level!";
   }
   else if (waterLevel <= LOW_WATER_LEVEL) {
-    // ระดับน้ำต่ำเกินไป
+    waterLow = true;
     waterAlertMessage = "Warning: Low Water Level!";
   }
   else {
@@ -232,59 +190,52 @@ void monitorAndSend() {
   }
 
   // -------------------------------
-  // 6. Auto Logic ตามตารางทดสอบ
+  // 4. Oxygen Alert Logic
   // -------------------------------
-  String systemStatus = "";
-  String pumpReason = "";
+  String oxygenAlertMessage = "";
+  bool oxygenLow = false;
 
-  bool waterCritical = (!ultrasonicError && sensorDistance < CRITICAL_DISTANCE);
-  bool waterNormal   = (!ultrasonicError && sensorDistance > CRITICAL_DISTANCE);
-
-  if (ultrasonicError) {
-    // ถ้า Ultrasonic Error ให้ปิดปั๊มเพื่อความปลอดภัย
-    pumpState = 0;
-    systemStatus = "ERROR";
-    pumpReason = "Ultrasonic Error";
-  }
-  else if (tempError) {
-    // ถ้า Temp Error ให้ปิดปั๊มเพื่อความปลอดภัย
-    pumpState = 0;
-    systemStatus = "ERROR";
-    pumpReason = "Temperature Sensor Error";
-  }
-  else if (waterCritical) {
-    // ระยะห่างผิวน้ำ < 50 cm
-    // น้ำล้นวิกฤต → Relay ON / LED แดงติด
-    pumpState = 1;
-    systemStatus = "WARNING";
-    pumpReason = "Water Critical: Distance < 50 cm";
-  }
-  else if (tempAbnormal) {
-    // อุณหภูมิ > 32°C หรือ < 25°C
-    // Relay ON / LED แดงติด
-    pumpState = 1;
-    systemStatus = "WARNING";
-    pumpReason = "Temperature Abnormal";
-  }
-  else if (waterNormal && tempNormal) {
-    // ระยะห่างผิวน้ำ > 50 cm และอุณหภูมิ 25–32°C
-    // Relay OFF / LED เขียวติด
-    pumpState = 0;
-    systemStatus = "NORMAL";
-    pumpReason = "Normal Condition";
+  if (oxygenLevel < MIN_OXYGEN) {
+    oxygenLow = true;
+    oxygenAlertMessage = "Warning: Low Oxygen!";
   }
   else {
-    // กรณีระยะเท่ากับ 50 cm พอดี หรือเคสอื่น ๆ
-    pumpState = 0;
-    systemStatus = "NORMAL";
-    pumpReason = "Default Normal";
+    oxygenAlertMessage = "Normal Oxygen!";
   }
 
-  // สั่ง Relay + LED
-  setPump(pumpState);
+  // -------------------------------
+  // 5. Relay Logic
+  // -------------------------------
+
+  // Relay 1: ปั๊มน้ำ / ระบายน้ำ
+  // เปิดเมื่อระดับน้ำสูงหรือต่ำผิดปกติ
+  if (waterHigh || waterLow) {
+    pumpRelayState = 1;
+  } else {
+    pumpRelayState = 0;
+  }
+
+  // Relay 2: เครื่องตีน้ำ / Aerator
+  // เปิดเมื่อค่าออกซิเจนต่ำ
+  if (oxygenLow) {
+    aeratorRelayState = 1;
+  } else {
+    aeratorRelayState = 0;
+  }
+
+  setRelay(RELAY_PUMP, pumpRelayState);
+  setRelay(RELAY_AERATOR, aeratorRelayState);
 
   // -------------------------------
-  // 7. แสดงผล Serial Monitor
+  // 6. LED Alert Logic
+  // -------------------------------
+  // ถ้ามีเหตุการณ์ผิดปกติใด ๆ ให้ไฟแดงติด
+  bool abnormal = ultrasonicError || waterHigh || waterLow || oxygenLow;
+
+  setAlertLED(abnormal);
+
+  // -------------------------------
+  // 7. Serial Monitor
   // -------------------------------
   Serial.println();
   Serial.println(">>> Updating Cloud Data...");
@@ -302,34 +253,27 @@ void monitorAndSend() {
     Serial.println(" cm");
   }
 
-  if (tempError) {
-    Serial.println("Temperature:     ERROR");
-  } else {
-    Serial.print("Temperature:     ");
-    Serial.print(tempC);
-    Serial.println(" C");
-  }
-
-  Serial.print("Temp Status:     ");
-  Serial.println(tempStatus);
-
-  Serial.print("System Status:   ");
-  Serial.println(systemStatus);
-
-  Serial.print("Pump Reason:     ");
-  Serial.println(pumpReason);
-
-  Serial.print("Pump State:      ");
-  Serial.println(pumpState == 1 ? "ON" : "OFF");
+  Serial.print("Oxygen Level:    ");
+  Serial.print(oxygenLevel);
+  Serial.println(" mg/L");
 
   Serial.print("Water Alert:     ");
   Serial.println(waterAlertMessage);
 
-  Serial.print("Temp Alert:      ");
-  Serial.println(tempAlertMessage);
+  Serial.print("Oxygen Alert:    ");
+  Serial.println(oxygenAlertMessage);
+
+  Serial.print("Pump Relay:      ");
+  Serial.println(pumpRelayState == 1 ? "ON" : "OFF");
+
+  Serial.print("Aerator Relay:   ");
+  Serial.println(aeratorRelayState == 1 ? "ON" : "OFF");
+
+  Serial.print("LED Status:      ");
+  Serial.println(abnormal ? "RED - ABNORMAL" : "GREEN - NORMAL");
 
   // -------------------------------
-  // 8. ส่งข้อมูลไป Adafruit IO
+  // 8. Send to Adafruit IO
   // -------------------------------
   if (!ultrasonicError) {
     levelFeed->save(waterLevel);
@@ -339,30 +283,28 @@ void monitorAndSend() {
     Serial.println("Skip water-level because ultrasonic error.");
   }
 
-  if (!tempError) {
-    tempFeed->save(tempC);
-    Serial.print("Sent water-temp: ");
-    Serial.println(tempC);
-  } else {
-    Serial.println("Skip water-temp because temperature error.");
-  }
+  oxygenFeed->save(oxygenLevel);
 
-  // ส่ง Pump Status ไป Adafruit IO
-  // 1 = ON, 0 = OFF
-  pumpFeed->save(pumpState);
+  pumpRelayFeed->save(pumpRelayState);
+  aeratorRelayFeed->save(aeratorRelayState);
 
-  // ส่งข้อความแจ้งเตือนไป Adafruit IO
   waterAlertFeed->save(waterAlertMessage);
-  tempAlertFeed->save(tempAlertMessage);
+  oxygenAlertFeed->save(oxygenAlertMessage);
 
-  Serial.print("Sent pump-status: ");
-  Serial.println(pumpState == 1 ? "ON" : "OFF");
+  Serial.print("Sent oxygen-level: ");
+  Serial.println(oxygenLevel);
+
+  Serial.print("Sent pump-relay-status: ");
+  Serial.println(pumpRelayState == 1 ? "ON" : "OFF");
+
+  Serial.print("Sent aerator-relay-status: ");
+  Serial.println(aeratorRelayState == 1 ? "ON" : "OFF");
 
   Serial.print("Sent water-level-alert: ");
   Serial.println(waterAlertMessage);
 
-  Serial.print("Sent temp-alert: ");
-  Serial.println(tempAlertMessage);
+  Serial.print("Sent oxygen-alert: ");
+  Serial.println(oxygenAlertMessage);
 
   Serial.println("Data sent to Adafruit IO.");
   Serial.println("---------------------------");
@@ -394,33 +336,36 @@ float readUltrasonic(bool &error) {
 }
 
 // =====================================================
-// อ่านค่าอุณหภูมิ DS18B20
+// อ่านค่า Oxygen Sensor
+// ใช้ Potentiometer จำลองค่า Oxygen 0 - 14 mg/L
 // =====================================================
-float readTemperature(bool &error) {
-  sensors.requestTemperatures();
-  float tempC = sensors.getTempCByIndex(0);
+float readOxygen() {
+  int analogValue = analogRead(OXYGEN_PIN);
 
-  if (tempC == DEVICE_DISCONNECTED_C) {
-    error = true;
-    return 0.0;
-  }
+  // ESP32 analogRead ได้ค่า 0 - 4095
+  // แปลงเป็น Oxygen 0.00 - 14.00 mg/L
+  float oxygenMgL = map(analogValue, 0, 4095, 0, 1400) / 100.0;
 
-  error = false;
-  return tempC;
+  return oxygenMgL;
 }
 
 // =====================================================
-// สั่ง Relay + LED
+// สั่ง Relay
 // =====================================================
-void setPump(int state) {
-  digitalWrite(RELAY_PIN, state);
+void setRelay(int relayPin, int state) {
+  digitalWrite(relayPin, state == 1 ? HIGH : LOW);
+}
 
-  if (state == HIGH) {
-    // Relay ON / Pump ON / LED แดงติด
+// =====================================================
+// LED Alert
+// ถ้าผิดปกติ = LED แดง
+// ถ้าปกติ = LED เขียว
+// =====================================================
+void setAlertLED(bool abnormal) {
+  if (abnormal) {
     digitalWrite(LED_R, HIGH);
     digitalWrite(LED_G, LOW);
   } else {
-    // Relay OFF / Pump OFF / LED เขียวติด
     digitalWrite(LED_R, LOW);
     digitalWrite(LED_G, HIGH);
   }

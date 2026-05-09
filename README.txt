@@ -1,20 +1,23 @@
-# Fish Pond Auto Pump Monitoring System
+# Fish Pond Water Level and Oxygen Monitoring System
 
-โปรเจกต์นี้เป็นระบบจำลองการตรวจสอบระดับน้ำและอุณหภูมิของบ่อปลา โดยใช้ ESP32 ร่วมกับเซนเซอร์ Ultrasonic HC-SR04 และ DS18B20 เพื่อควบคุมปั๊มน้ำอัตโนมัติ พร้อมส่งข้อมูลไปแสดงผลบน Adafruit IO Dashboard
+โปรเจกต์นี้เป็นระบบจำลองการตรวจสอบระดับน้ำและค่าออกซิเจนในบ่อปลา โดยใช้ ESP32 ร่วมกับเซนเซอร์ Ultrasonic HC-SR04 และ Oxygen Sensor จำลองด้วย Potentiometer เพื่อควบคุม Relay 2 ตัว ได้แก่ Relay สำหรับปั๊มน้ำ และ Relay สำหรับเครื่องตีน้ำ / Aerator พร้อมส่งข้อมูลไปแสดงผลบน Adafruit IO Dashboard แบบ Real-time
 
 ## Features
 
-- วัดระดับน้ำในบ่อด้วย Ultrasonic Sensor
-- วัดอุณหภูมิน้ำด้วย DS18B20
-- ควบคุมปั๊มน้ำอัตโนมัติตามระดับน้ำและอุณหภูมิ
+- วัดระดับน้ำในบ่อด้วย Ultrasonic Sensor HC-SR04
+- วัดค่าออกซิเจนในน้ำโดยใช้ Potentiometer จำลอง Oxygen Sensor
+- ควบคุม Relay 2 ตัวแยกหน้าที่กัน
+  - Relay 1 ใช้ควบคุมปั๊มน้ำ / ระบายน้ำ
+  - Relay 2 ใช้ควบคุมเครื่องตีน้ำ / Aerator เพื่อเพิ่มออกซิเจน
+- ถ้ามีเหตุการณ์ผิดปกติ ไฟ LED สีแดงจะติด
+- ถ้าระบบปกติ ไฟ LED สีเขียวจะติด
 - ส่งข้อมูลขึ้น Adafruit IO Dashboard
-- แสดงสถานะปั๊มผ่าน Feed: pump-status
-- แสดงสถานะผ่าน LED เขียว/แดง
+- แสดงข้อความแจ้งเตือนระดับน้ำและค่าออกซิเจนผ่าน Dashboard
 
 ## Required VS Code Extensions
 
 1. PlatformIO IDE  
-   ใช้สำหรับเขียน อัปโหลด และจัดการโปรเจกต์ ESP32/Arduino
+   ใช้สำหรับเขียน อัปโหลด และจัดการโปรเจกต์ ESP32 / Arduino
 
 2. Wokwi Simulator  
    ใช้สำหรับจำลองการทำงานของวงจร ESP32 และเซนเซอร์ใน VS Code
@@ -26,11 +29,10 @@
 
 - ESP32 DevKit
 - HC-SR04 Ultrasonic Sensor
-- DS18B20 Temperature Sensor
-- Relay Module
+- Potentiometer ใช้จำลอง Oxygen Sensor
+- Relay Module จำนวน 2 ตัว
 - Green LED
 - Red LED
-- Resistors
 - Jumper wires
 
 ## Pin Connection
@@ -39,8 +41,9 @@
 |---|---|
 | HC-SR04 TRIG | GPIO 5 |
 | HC-SR04 ECHO | GPIO 18 |
-| DS18B20 DATA | GPIO 4 |
-| Relay | GPIO 25 |
+| Oxygen Sensor / Potentiometer SIG | GPIO 34 |
+| Relay 1: Pump Relay | GPIO 25 |
+| Relay 2: Aerator Relay | GPIO 33 |
 | Green LED | GPIO 26 |
 | Red LED | GPIO 27 |
 
@@ -51,31 +54,28 @@
 | Feed Name | Description |
 |---|---|
 | water-level | แสดงระดับน้ำในบ่อ หน่วย cm |
-| water-temp | แสดงอุณหภูมิน้ำ หน่วย °C |
-| pump-status | แสดงสถานะปั๊ม 1 = ON, 0 = OFF |
+| oxygen-level | แสดงค่าออกซิเจนในน้ำ หน่วย mg/L |
+| pump-relay-status | แสดงสถานะ Relay ปั๊มน้ำ 1 = ON, 0 = OFF |
+| aerator-relay-status | แสดงสถานะ Relay เครื่องตีน้ำ 1 = ON, 0 = OFF |
+| water-level-alert | แสดงข้อความแจ้งเตือนระดับน้ำ |
+| oxygen-alert | แสดงข้อความแจ้งเตือนค่าออกซิเจน |
 
-## Auto Pump Logic
+## Dashboard Setup
 
-ระบบควบคุมปั๊มอัตโนมัติตามเงื่อนไขนี้:
+ใน Adafruit IO Dashboard แนะนำให้สร้าง Block ดังนี้:
 
-| Condition | Pump Status |
+| Dashboard Block | Feed |
 |---|---|
-| Water Level >= 150 cm | ON |
-| Water Level <= 50 cm | OFF |
-| Temperature > 32°C | ON |
-| Temperature < 25°C | OFF |
-| Sensor Error | OFF |
+| Gauge ระดับน้ำ | water-level |
+| Gauge / Chart ค่าออกซิเจน | oxygen-level |
+| Indicator สถานะปั๊มน้ำ | pump-relay-status |
+| Indicator สถานะเครื่องตีน้ำ | aerator-relay-status |
+| Text แจ้งเตือนระดับน้ำ | water-level-alert |
+| Text แจ้งเตือนออกซิเจน | oxygen-alert |
 
-หมายเหตุ: ระดับน้ำคำนวณจากสูตร  
+## System Logic
+
+ระบบใช้ HC-SR04 วัดระยะจากเซนเซอร์ถึงผิวน้ำ จากนั้นคำนวณระดับน้ำด้วยสูตร:
+
+```text
 Water Level = Pond Depth - Sensor Distance
-
-โดยในโค้ดกำหนด Pond Depth = 200 cm
-
-## Important Settings in Code
-
-```cpp
-const float POND_DEPTH = 200.0;
-const float PUMP_ON_LEVEL  = 150.0;
-const float PUMP_OFF_LEVEL = 50.0;
-const float MIN_SAFE_TEMP = 25.0;
-const float MAX_SAFE_TEMP = 32.0;
